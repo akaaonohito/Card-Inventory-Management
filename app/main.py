@@ -14,7 +14,7 @@ from .constants import (
     STATUS_VALUES,
 )
 from .csv_io import export_csv, import_csv, preview_import, write_sample_csv
-from .database import ROOT_DIR, get_inventory, initialize_database, insert_inventory, list_inventory, transaction
+from .database import ROOT_DIR, get_inventory, initialize_database, insert_inventory, list_inventory, transaction, update_inventory
 from .validation import ValidationError, normalize_inventory_payload
 
 
@@ -31,6 +31,11 @@ class InventoryApp(tk.Tk):
         write_sample_csv(ROOT_DIR / "sample_inventory.csv")
         self.status_filter = tk.StringVar(value="販売中")
         self.add_vars: dict[str, tk.StringVar] = {}
+        self.quick_edit_inventory_id: str | None = None
+        self.quick_edit_vars: dict[str, tk.StringVar] = {}
+        self.quick_edit_widgets: list[tk.Widget] = []
+        self.quick_edit_buttons: ttk.Frame | None = None
+        self._tree_values_before_edit: tuple[object, ...] | None = None
         self._build_ui()
         self.refresh_inventory()
 
@@ -73,7 +78,7 @@ class InventoryApp(tk.Tk):
         )
         status_box.pack(side="left", padx=(8, 12))
         ttk.Button(controls, text="更新", command=self.refresh_inventory).pack(side="left")
-        ttk.Button(controls, text="通常編集", command=self.edit_selected).pack(side="left", padx=(12, 0))
+        ttk.Button(controls, text="クイック編集", command=self.edit_selected).pack(side="left", padx=(12, 0))
         ttk.Button(controls, text="詳細編集", command=self.detail_edit_selected).pack(side="left", padx=(8, 0))
 
         tree_frame = ttk.Frame(self.inventory_tab)
@@ -88,10 +93,11 @@ class InventoryApp(tk.Tk):
         self.tree.column("card_name", width=230)
         self.tree.column("note", width=180)
         self.tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self._scroll_tree)
+        self.tree_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=self._on_tree_yscroll)
         self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
+        self.tree.bind("<Configure>", lambda _event: self._position_quick_edit_widgets())
 
     def _build_add_tab(self) -> None:
         self.add_tab.columnconfigure(0, weight=1)
@@ -146,6 +152,9 @@ class InventoryApp(tk.Tk):
         ttk.Label(self.csv_tab, text=f"サンプルCSV: {sample}").grid(row=2, column=0, sticky="w", pady=(8, 0))
 
     def refresh_inventory(self) -> None:
+        if not self._confirm_discard_quick_edit():
+            return
+        self._clear_quick_edit()
         for item in self.tree.get_children():
             self.tree.delete(item)
         for row in list_inventory(self.status_filter.get()):
@@ -178,13 +187,19 @@ class InventoryApp(tk.Tk):
         inventory_id = self.selected_inventory_id()
         if not inventory_id:
             return
+        if self.quick_edit_inventory_id == inventory_id:
+            return
+        if not self._confirm_discard_quick_edit():
+            return
         row = get_inventory(inventory_id)
         if not row:
             messagebox.showerror(APP_NAME, "選択した在庫が見つかりません。")
             return
-        self._open_edit_dialog(row, EDIT_FIELDS, title="通常編集")
+        self._start_quick_edit(row)
 
     def detail_edit_selected(self) -> None:
+        if not self._confirm_discard_quick_edit():
+            return
         inventory_id = self.selected_inventory_id()
         if not inventory_id:
             return
@@ -238,8 +253,6 @@ class InventoryApp(tk.Tk):
         try:
             payload = normalize_inventory_payload(raw, for_insert=False)
             with transaction() as conn:
-                from .database import update_inventory
-
                 update_inventory(conn, original_row["inventory_id"], payload)
         except ValidationError as exc:
             messagebox.showerror(APP_NAME, str(exc), parent=dialog)
@@ -247,7 +260,121 @@ class InventoryApp(tk.Tk):
         dialog.destroy()
         self.refresh_inventory()
 
+    def _start_quick_edit(self, row) -> None:
+        self._clear_quick_edit()
+        inventory_id = row["inventory_id"]
+        if not self.tree.exists(inventory_id):
+            return
+        self.quick_edit_inventory_id = inventory_id
+        self.quick_edit_vars = {}
+        self._tree_values_before_edit = tuple(self.tree.item(inventory_id, "values"))
+        values = list(self._tree_values_before_edit)
+        columns = list(LIST_COLUMNS)
+        for field in EDIT_FIELDS:
+            index = columns.index(field)
+            values[index] = f"編集中: {FIELD_LABELS[field]}"
+            var = tk.StringVar(value="" if row[field] is None else str(row[field]))
+            self.quick_edit_vars[field] = var
+            if field == "status":
+                widget = ttk.Combobox(self.tree, textvariable=var, values=STATUS_VALUES, state="readonly")
+            else:
+                widget = ttk.Entry(self.tree, textvariable=var)
+            self.quick_edit_widgets.append(widget)
+        self.tree.item(inventory_id, values=values)
+        self.quick_edit_buttons = ttk.Frame(self.tree)
+        ttk.Button(self.quick_edit_buttons, text="保存", command=self._save_quick_edit).pack(side="left")
+        ttk.Button(self.quick_edit_buttons, text="キャンセル", command=self._cancel_quick_edit).pack(side="left", padx=(4, 0))
+        self.tree.selection_set(inventory_id)
+        self.tree.focus(inventory_id)
+        self.after_idle(self._position_quick_edit_widgets)
+
+    def _position_quick_edit_widgets(self) -> None:
+        if not self.quick_edit_inventory_id:
+            return
+        if not self.tree.exists(self.quick_edit_inventory_id):
+            self._clear_quick_edit()
+            return
+        if not self.tree.bbox(self.quick_edit_inventory_id):
+            return
+        for widget, field in zip(self.quick_edit_widgets, EDIT_FIELDS, strict=True):
+            bbox = self.tree.bbox(self.quick_edit_inventory_id, field)
+            if not bbox:
+                widget.place_forget()
+                continue
+            x, y, width, height = bbox
+            widget.place(x=x + 1, y=y + 1, width=max(width - 2, 40), height=max(height - 2, 20))
+        if self.quick_edit_buttons:
+            status_bbox = self.tree.bbox(self.quick_edit_inventory_id, "status")
+            tree_width = self.tree.winfo_width()
+            if status_bbox:
+                x, y, width, height = status_bbox
+                button_width = 132
+                self.quick_edit_buttons.place(
+                    x=max(tree_width - button_width - 8, x + width - button_width),
+                    y=y + 1,
+                    width=button_width,
+                    height=max(height - 2, 20),
+                )
+
+    def _scroll_tree(self, *args) -> None:
+        self.tree.yview(*args)
+        self._position_quick_edit_widgets()
+
+    def _on_tree_yscroll(self, *args) -> None:
+        self.tree_scrollbar.set(*args)
+        self._position_quick_edit_widgets()
+
+    def _save_quick_edit(self) -> None:
+        if not self.quick_edit_inventory_id:
+            return
+        row = get_inventory(self.quick_edit_inventory_id)
+        if not row:
+            messagebox.showerror(APP_NAME, "編集中の在庫が見つかりません。")
+            self._clear_quick_edit()
+            return
+        raw = {field: row[field] for field in FIELD_TO_HEADER if field != "inventory_id"}
+        raw.update({field: var.get() for field, var in self.quick_edit_vars.items()})
+        try:
+            payload = normalize_inventory_payload(raw, for_insert=False)
+            with transaction() as conn:
+                update_inventory(conn, self.quick_edit_inventory_id, payload)
+        except ValidationError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self._clear_quick_edit()
+        self.refresh_inventory()
+
+    def _cancel_quick_edit(self) -> None:
+        self._clear_quick_edit(restore_values=True)
+
+    def _clear_quick_edit(self, *, restore_values: bool = False) -> None:
+        if restore_values and self.quick_edit_inventory_id and self._tree_values_before_edit:
+            if self.tree.exists(self.quick_edit_inventory_id):
+                self.tree.item(self.quick_edit_inventory_id, values=self._tree_values_before_edit)
+        for widget in self.quick_edit_widgets:
+            widget.destroy()
+        self.quick_edit_widgets = []
+        if self.quick_edit_buttons:
+            self.quick_edit_buttons.destroy()
+        self.quick_edit_buttons = None
+        self.quick_edit_inventory_id = None
+        self.quick_edit_vars = {}
+        self._tree_values_before_edit = None
+
+    def _confirm_discard_quick_edit(self) -> bool:
+        if not self.quick_edit_inventory_id:
+            return True
+        discard = messagebox.askyesno(
+            APP_NAME,
+            "未保存の編集内容があります。破棄して別の商品を編集しますか？",
+        )
+        if discard:
+            self._clear_quick_edit(restore_values=True)
+        return discard
+
     def import_csv(self) -> None:
+        if not self._confirm_discard_quick_edit():
+            return
         path = filedialog.askopenfilename(
             title="CSVインポート",
             filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
@@ -278,6 +405,8 @@ class InventoryApp(tk.Tk):
         self.refresh_inventory()
 
     def export_csv(self) -> None:
+        if not self._confirm_discard_quick_edit():
+            return
         path = filedialog.asksaveasfilename(
             title="CSVエクスポート",
             defaultextension=".csv",
@@ -300,4 +429,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

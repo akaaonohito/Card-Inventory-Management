@@ -69,8 +69,6 @@ LIST_COLUMNS = (
 )
 
 EDIT_FIELDS = (
-    "genre",
-    "card_name",
     "note",
     "quantity",
     "sale_price",
@@ -94,4 +92,3 @@ DETAIL_EDIT_FIELDS = (
     "last_checked_date",
     "memo",
 )
-
