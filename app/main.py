@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import html
 import re
 import tkinter as tk
 import unicodedata
@@ -13,7 +14,6 @@ from urllib.parse import quote_plus
 from .constants import (
     APP_NAME,
     CONDITION_VALUES,
-    DEFAULT_VISIBLE_COLUMNS,
     DETAIL_EDIT_FIELDS,
     DISPLAYABLE_COLUMNS,
     EDIT_FIELDS,
@@ -49,7 +49,7 @@ from .validation import ValidationError, normalize_inventory_payload
 FIELD_LABELS = FIELD_TO_HEADER | VIRTUAL_FIELD_LABELS
 ALL_STATUS_FILTER_LABEL = "全商品"
 TREE_COLUMNS = ("selected", *DISPLAYABLE_COLUMNS, "actions")
-TEXT_FILTER_FIELDS = ("genre", "card_name", "rarity", "set_name", "language", "collector_number", "note")
+TEXT_FILTER_FIELDS = ("genre", "card_name", "rarity", "set_name", "language", "collector_number", "note", "condition")
 DATE_FILTERS = (
     ("date_from", "日付From"),
     ("date_to", "日付To"),
@@ -67,6 +67,17 @@ ADD_FIELD_CHOICES = {
     "status": STATUS_VALUES,
 }
 ADD_READONLY_FIELDS = {"genre", "status"}
+FILTER_FIELD_CHOICES = {
+    "genre": GENRE_VALUES,
+    "rarity": RARITY_VALUES,
+    "language": LANGUAGE_VALUES,
+    "condition": CONDITION_VALUES,
+}
+PRICE_SEARCH_TARGET_MODE_LABELS = {
+    "": "全モード",
+    "purchase": "買取モードのみ",
+}
+PRICE_SEARCH_TARGET_MODE_BY_LABEL = {label: mode for mode, label in PRICE_SEARCH_TARGET_MODE_LABELS.items()}
 QUICK_EDIT_EXCLUDED_FIELDS = {
     "selected",
     "inventory_id",
@@ -224,13 +235,14 @@ class InventoryApp(tk.Tk):
             widget.grid(row=row, column=input_col, columnspan=input_span, sticky="ew", padx=(0, 16), pady=3)
 
         text_layout = (
-            (0, 0, "ジャンル", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["genre"], width=10), 1),
-            (0, 1, "セット", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["set_name"], width=10), 1),
-            (0, 2, "コレクター番号", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["collector_number"], width=10), 1),
-            (0, 3, "言語", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["language"], width=8), 1),
-            (2, 0, "カード名", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["card_name"], width=22), 2),
-            (2, 2, "補足", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["note"], width=22), 2),
-            (2, 4, "レア", ttk.Entry(self.filter_frame, textvariable=self.filter_vars["rarity"], width=8), 1),
+            (0, 0, "ジャンル", self._filter_text_widget("genre", width=10), 1),
+            (0, 1, "セット", self._filter_text_widget("set_name", width=10), 1),
+            (0, 2, "コレクター番号", self._filter_text_widget("collector_number", width=10), 1),
+            (0, 3, "言語", self._filter_text_widget("language", width=8), 1),
+            (2, 0, "カード名", self._filter_text_widget("card_name", width=22), 2),
+            (2, 2, "補足", self._filter_text_widget("note", width=22), 2),
+            (2, 4, "レア", self._filter_text_widget("rarity", width=8), 1),
+            (2, 5, "カード状態", self._filter_text_widget("condition", width=8), 1),
         )
         for row, group, label, widget, group_span in text_layout:
             add_filter_widget(row, group, label, widget, group_span=group_span)
@@ -270,6 +282,17 @@ class InventoryApp(tk.Tk):
         ttk.Button(buttons, text="適用", command=self.refresh_inventory).pack(side="right", padx=(0, 8))
         self.filter_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
+    def _filter_text_widget(self, field: str, *, width: int) -> tk.Widget:
+        if field in FILTER_FIELD_CHOICES:
+            return ttk.Combobox(
+                self.filter_frame,
+                textvariable=self.filter_vars[field],
+                values=("", *FILTER_FIELD_CHOICES[field]),
+                state="normal",
+                width=width,
+            )
+        return ttk.Entry(self.filter_frame, textvariable=self.filter_vars[field], width=width)
+
     def _build_inventory_controls(self) -> None:
         controls = ttk.Frame(self.inventory_tab)
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -283,6 +306,8 @@ class InventoryApp(tk.Tk):
         ttk.Button(controls, text="選択確認日を今日にする", command=lambda: self.bulk_action("checked_today")).pack(side="left")
         ttk.Button(controls, text="選択を売却済みにする", command=lambda: self.bulk_action("sold")).pack(side="left", padx=(8, 0))
         ttk.Button(controls, text="選択を削除済みにする", command=lambda: self.bulk_action("deleted")).pack(side="left", padx=(8, 0))
+        ttk.Separator(controls, orient="vertical").pack(side="left", fill="y", padx=12)
+        ttk.Button(controls, text="買取見積表印刷", command=self.print_purchase_estimate).pack(side="left")
 
     def _build_inventory_tree(self) -> None:
         tree_frame = ttk.Frame(self.inventory_tab)
@@ -429,20 +454,24 @@ class InventoryApp(tk.Tk):
         links.rowconfigure(0, weight=1)
         self.price_settings_tree = ttk.Treeview(
             links,
-            columns=("id", "genre", "site_name", "enabled"),
+            columns=("id", "genre", "site_name", "target_mode", "enabled"),
             show="headings",
             height=7,
         )
-        for column, width in (("id", 60), ("genre", 120), ("site_name", 220), ("enabled", 80)):
-            self.price_settings_tree.heading(column, text={"id": "ID", "genre": "ジャンル", "site_name": "サイト名", "enabled": "有効"}[column])
+        for column, width in (("id", 60), ("genre", 120), ("site_name", 220), ("target_mode", 130), ("enabled", 80)):
+            self.price_settings_tree.heading(
+                column,
+                text={"id": "ID", "genre": "ジャンル", "site_name": "サイト名", "target_mode": "適用モード", "enabled": "有効"}[column],
+            )
             self.price_settings_tree.column(column, width=width, anchor="w")
         self.price_settings_tree.grid(row=0, column=0, sticky="nsew")
         self.price_settings_tree.bind("<<TreeviewSelect>>", lambda _event: self.load_selected_price_setting())
 
         form = ttk.Frame(links)
         form.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        for field in ("genre", "site_name", "url_template", "query_template"):
+        for field in ("genre", "site_name", "url_template", "query_template", "target_mode"):
             self.price_setting_vars[field] = tk.StringVar()
+        self.price_setting_vars["target_mode"].set(PRICE_SEARCH_TARGET_MODE_LABELS[""])
         self.price_setting_vars["enabled"] = tk.BooleanVar(value=True)
         price_fields = (
             ("genre", "ジャンル"),
@@ -453,9 +482,17 @@ class InventoryApp(tk.Tk):
         for index, (field, label) in enumerate(price_fields):
             ttk.Label(form, text=label).grid(row=index, column=0, sticky="w", padx=(0, 8), pady=3)
             ttk.Entry(form, textvariable=self.price_setting_vars[field], width=80).grid(row=index, column=1, sticky="ew", pady=3)
-        ttk.Checkbutton(form, text="有効", variable=self.price_setting_vars["enabled"]).grid(row=4, column=1, sticky="w")
+        ttk.Label(form, text="適用モード").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Combobox(
+            form,
+            textvariable=self.price_setting_vars["target_mode"],
+            values=tuple(PRICE_SEARCH_TARGET_MODE_LABELS.values()),
+            state="readonly",
+            width=20,
+        ).grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(form, text="有効", variable=self.price_setting_vars["enabled"]).grid(row=5, column=1, sticky="w")
         buttons = ttk.Frame(form)
-        buttons.grid(row=5, column=1, sticky="w", pady=(8, 0))
+        buttons.grid(row=6, column=1, sticky="w", pady=(8, 0))
         ttk.Button(buttons, text="新規", command=self.clear_price_setting_form).pack(side="left")
         ttk.Button(buttons, text="保存", command=self.save_price_setting).pack(side="left", padx=(8, 0))
         form.columnconfigure(1, weight=1)
@@ -724,13 +761,20 @@ class InventoryApp(tk.Tk):
         return " / ".join(names)
 
     def _matching_price_settings(self, row: dict[str, object]) -> list[object]:
-        settings = []
+        common_settings = []
+        mode_settings = []
         genre = str(row.get("genre") or "")
         for setting in list_price_search_settings():
             setting_genre = str(setting["genre"] or "")
             if not setting_genre or setting_genre == genre:
-                settings.append(setting)
-        return settings
+                target_mode = str(setting["target_mode"] or "")
+                if target_mode == self.current_mode_key:
+                    mode_settings.append(setting)
+                elif not target_mode:
+                    common_settings.append(setting)
+        if mode_settings:
+            return mode_settings
+        return common_settings
 
     def _update_filter_summary(self) -> None:
         active = []
@@ -1222,6 +1266,163 @@ class InventoryApp(tk.Tk):
             return
         messagebox.showinfo(APP_NAME, f"{count}件をエクスポートしました。")
 
+    def print_purchase_estimate(self) -> None:
+        if not self._confirm_discard_quick_edit():
+            return
+        rows = self._purchase_estimate_rows()
+        if not rows:
+            messagebox.showinfo(APP_NAME, "印刷する在庫がありません。")
+            return
+        output_path = ROOT_DIR / "data" / "purchase_estimate_print.html"
+        output_path.parent.mkdir(exist_ok=True)
+        output_path.write_text(self._build_purchase_estimate_html(rows), encoding="utf-8")
+        webbrowser.open(output_path.resolve().as_uri(), new=2)
+
+    def _purchase_estimate_rows(self) -> list[dict[str, object]]:
+        if self.selected_ids:
+            selected = set(self.selected_ids)
+            rows = [row for row in self.filtered_rows if str(row["inventory_id"]) in selected]
+            if rows:
+                return rows
+        return list(self.filtered_rows)
+
+    def _build_purchase_estimate_html(self, rows: list[dict[str, object]]) -> str:
+        today = date.today()
+        total_quantity = sum(self._as_int(row.get("quantity")) for row in rows)
+        total_amount = sum(
+            self._as_int(row.get("quantity")) * self._as_int(row.get("purchase_price"))
+            for row in rows
+        )
+        body_rows = "\n".join(self._purchase_estimate_row_html(row) for row in rows)
+        return f"""<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>買取見積表</title>
+<style>
+@page {{ size: A4 landscape; margin: 8mm; }}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  color: #111;
+  font-family: "Yu Gothic", "Meiryo", sans-serif;
+  font-size: 11px;
+}}
+.sheet {{ width: 100%; }}
+.header {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}}
+h1 {{ margin: 0; font-size: 24px; line-height: 1; }}
+.date-line {{ min-width: 190px; text-align: right; font-size: 12px; }}
+.section-title {{ margin: 8px 0 2px; font-size: 17px; font-weight: 700; }}
+table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+td, th {{ border: 1px solid #111; padding: 2px 4px; vertical-align: middle; }}
+.customer td {{ height: 20px; }}
+.label {{ width: 72px; white-space: nowrap; }}
+.id-options td {{ height: 19px; }}
+.items th {{ background: #8cc84b; text-align: center; font-weight: 700; }}
+.items td {{ height: 20px; }}
+.num {{ text-align: right; white-space: nowrap; }}
+.center {{ text-align: center; }}
+.totals td {{ border-top: 0; }}
+.total-label {{ text-align: right; font-weight: 700; }}
+.total-value {{ font-weight: 700; font-size: 14px; }}
+@media print {{
+  body {{ print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+}}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="header">
+    <h1>買取見積表</h1>
+    <div class="date-line">提示年月日：　{today.year}年　{today.month}月　{today.day}日</div>
+  </div>
+
+  <div class="section-title">【お客様記入欄】</div>
+  <table class="customer">
+    <tr><td class="label">フリガナ</td><td></td><td class="label">生年月日</td><td>　　　年　　　月　　　日</td></tr>
+    <tr><td class="label">氏名</td><td></td><td class="label">電話番号</td><td></td></tr>
+    <tr><td class="label">住所　〒</td><td colspan="3"></td></tr>
+    <tr><td></td><td colspan="3">都道府県市区町村・番地・建物名など</td></tr>
+  </table>
+  <table class="id-options">
+    <tr><td>身分証明書　□運転免許証　□健康保険証　□マイナンバーカード　□パスポート　□学生証</td></tr>
+    <tr><td>　　　　　　□その他（　　　　　　　　　　　　）</td></tr>
+  </table>
+
+  <div class="section-title">【お見積り内容】</div>
+  <table class="items">
+    <thead>
+      <tr>
+        <th style="width: 9%;">ジャンル</th>
+        <th style="width: 22%;">カード名</th>
+        <th style="width: 7%;">レア</th>
+        <th style="width: 7%;">言語</th>
+        <th style="width: 18%;">補足</th>
+        <th style="width: 9%;">カード状態</th>
+        <th style="width: 9%;">買取価格</th>
+        <th style="width: 6%;">枚数</th>
+        <th style="width: 9%;">買取合計</th>
+      </tr>
+    </thead>
+    <tbody>
+      {body_rows}
+      <tr class="totals">
+        <td colspan="7" class="total-label">合計枚数</td>
+        <td class="center total-value">{total_quantity}枚</td>
+        <td></td>
+      </tr>
+      <tr class="totals">
+        <td colspan="7" class="total-label">合計金額</td>
+        <td colspan="2" class="num total-value">{self._format_yen(total_amount)}</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<script>
+window.addEventListener("load", () => window.print());
+</script>
+</body>
+</html>
+"""
+
+    def _purchase_estimate_row_html(self, row: dict[str, object]) -> str:
+        quantity = self._as_int(row.get("quantity"))
+        purchase_price = self._as_int(row.get("purchase_price"))
+        total = quantity * purchase_price
+        cells = (
+            self._html_text(row.get("genre")),
+            self._html_text(row.get("card_name")),
+            self._html_text(row.get("rarity")),
+            self._html_text(row.get("language")),
+            self._html_text(row.get("note")),
+            self._html_text(row.get("condition")),
+            self._format_yen(purchase_price),
+            f"{quantity}",
+            self._format_yen(total),
+        )
+        classes = ("", "", "", "center", "", "center", "num", "num", "num")
+        return "<tr>" + "".join(
+            f'<td class="{css_class}">{cell}</td>' if css_class else f"<td>{cell}</td>"
+            for cell, css_class in zip(cells, classes, strict=True)
+        ) + "</tr>"
+
+    def _as_int(self, value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _format_yen(self, value: int) -> str:
+        return f"¥{value:,}"
+
+    def _html_text(self, value: object) -> str:
+        return html.escape("" if value is None else str(value))
+
     def save_visible_columns(self) -> None:
         mode_key = self._mode_key_from_label(self.settings_mode_label_var.get())
         visible = [field for field, var in self.visible_column_vars.items() if var.get()]
@@ -1259,7 +1460,13 @@ class InventoryApp(tk.Tk):
                 "",
                 "end",
                 iid=str(setting["id"]),
-                values=(setting["id"], setting["genre"], setting["site_name"], "有効" if setting["enabled"] else "無効"),
+                values=(
+                    setting["id"],
+                    setting["genre"],
+                    setting["site_name"],
+                    PRICE_SEARCH_TARGET_MODE_LABELS.get(str(setting["target_mode"] or ""), "全モード"),
+                    "有効" if setting["enabled"] else "無効",
+                ),
             )
 
     def load_selected_price_setting(self) -> None:
@@ -1273,12 +1480,14 @@ class InventoryApp(tk.Tk):
         self.editing_price_setting_id = setting_id
         for field in ("genre", "site_name", "url_template", "query_template"):
             self.price_setting_vars[field].set(setting[field])
+        self.price_setting_vars["target_mode"].set(PRICE_SEARCH_TARGET_MODE_LABELS.get(str(setting["target_mode"] or ""), "全モード"))
         self.price_setting_vars["enabled"].set(bool(setting["enabled"]))
 
     def clear_price_setting_form(self) -> None:
         self.editing_price_setting_id = None
         for field in ("genre", "site_name", "url_template", "query_template"):
             self.price_setting_vars[field].set("")
+        self.price_setting_vars["target_mode"].set(PRICE_SEARCH_TARGET_MODE_LABELS[""])
         self.price_setting_vars["enabled"].set(True)
 
     def save_price_setting(self) -> None:
@@ -1288,6 +1497,7 @@ class InventoryApp(tk.Tk):
             "site_name": self.price_setting_vars["site_name"].get(),
             "url_template": self.price_setting_vars["url_template"].get(),
             "query_template": self.price_setting_vars["query_template"].get(),
+            "target_mode": PRICE_SEARCH_TARGET_MODE_BY_LABEL.get(str(self.price_setting_vars["target_mode"].get()), ""),
             "enabled": self.price_setting_vars["enabled"].get(),
         }
         try:

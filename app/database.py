@@ -74,10 +74,12 @@ def initialize_database() -> None:
                 site_name TEXT NOT NULL,
                 url_template TEXT NOT NULL,
                 query_template TEXT NOT NULL,
+                target_mode TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1
             )
             """
         )
+        ensure_price_search_schema(conn)
         conn.execute(
             """
             INSERT INTO app_meta(key, value)
@@ -116,6 +118,12 @@ def seed_default_price_search_settings(conn: sqlite3.Connection) -> None:
         """,
         defaults,
     )
+
+
+def ensure_price_search_schema(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(price_search_settings)")}
+    if "target_mode" not in columns:
+        conn.execute("ALTER TABLE price_search_settings ADD COLUMN target_mode TEXT NOT NULL DEFAULT ''")
 
 
 def create_backup(reason: str) -> Path | None:
@@ -290,7 +298,7 @@ def list_price_search_settings(include_disabled: bool = False) -> list[sqlite3.R
                 conn.execute(
                     """
                     SELECT * FROM price_search_settings
-                    ORDER BY enabled DESC, genre, site_name, id
+                    ORDER BY enabled DESC, target_mode DESC, genre, site_name, id
                     """
                 )
             )
@@ -299,7 +307,7 @@ def list_price_search_settings(include_disabled: bool = False) -> list[sqlite3.R
                 """
                 SELECT * FROM price_search_settings
                 WHERE enabled = 1
-                ORDER BY genre, site_name, id
+                ORDER BY target_mode DESC, genre, site_name, id
                 """
             )
         )
@@ -312,6 +320,7 @@ def upsert_price_search_setting(conn: sqlite3.Connection, data: dict[str, object
         "site_name": str(data.get("site_name") or "").strip(),
         "url_template": str(data.get("url_template") or "").strip(),
         "query_template": str(data.get("query_template") or "").strip(),
+        "target_mode": str(data.get("target_mode") or "").strip(),
         "enabled": 1 if data.get("enabled") else 0,
     }
     if not payload["site_name"]:
@@ -320,12 +329,14 @@ def upsert_price_search_setting(conn: sqlite3.Connection, data: dict[str, object
         raise ValueError("検索URLテンプレートには {query} を含めてください。")
     if not payload["query_template"]:
         raise ValueError("検索語テンプレートは必須です。")
+    if payload["target_mode"] not in ("", "purchase"):
+        raise ValueError("適用モードを選択してください。")
     if payload["id"]:
         conn.execute(
             """
             UPDATE price_search_settings
             SET genre = :genre, site_name = :site_name, url_template = :url_template,
-                query_template = :query_template, enabled = :enabled
+                query_template = :query_template, target_mode = :target_mode, enabled = :enabled
             WHERE id = :id
             """,
             payload,
@@ -333,8 +344,8 @@ def upsert_price_search_setting(conn: sqlite3.Connection, data: dict[str, object
         return int(payload["id"])
     cursor = conn.execute(
         """
-        INSERT INTO price_search_settings(genre, site_name, url_template, query_template, enabled)
-        VALUES(:genre, :site_name, :url_template, :query_template, :enabled)
+        INSERT INTO price_search_settings(genre, site_name, url_template, query_template, target_mode, enabled)
+        VALUES(:genre, :site_name, :url_template, :query_template, :target_mode, :enabled)
         """,
         payload,
     )

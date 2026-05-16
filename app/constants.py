@@ -94,19 +94,6 @@ FIELD_TO_HEADER = {
 
 HEADER_TO_FIELD = {header: field for field, header in FIELD_TO_HEADER.items()}
 
-LIST_COLUMNS = (
-    "selected",
-    "inventory_id",
-    "genre",
-    "card_name",
-    "note",
-    "quantity",
-    "sale_price",
-    "last_checked_date",
-    "status",
-    "price_links",
-)
-
 EDIT_FIELDS = (
     "note",
     "quantity",
@@ -238,15 +225,4 @@ SORT_FIELDS = (
     "last_checked_date",
     "updated_date",
     "status",
-)
-
-PRICE_LINK_VARIABLES = (
-    "genre",
-    "card_name",
-    "set",
-    "language",
-    "collector_number",
-    "condition",
-    "note",
-    "query",
 )

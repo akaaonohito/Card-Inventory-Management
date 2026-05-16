@@ -5,6 +5,7 @@ venv/
 
 data/*.sqlite3
 data/*.sqlite3-*
+data/*.html
 data/backups/
 
 .DS_Store
