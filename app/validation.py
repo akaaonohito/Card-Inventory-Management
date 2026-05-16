@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date
 
 from .constants import STATUS_VALUES
 
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_WITH_YEAR_PATTERN = re.compile(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$")
+DATE_WITHOUT_YEAR_PATTERN = re.compile(r"^(\d{1,2})[/-](\d{1,2})$")
+JAPANESE_DATE_WITHOUT_YEAR_PATTERN = re.compile(r"^(\d{1,2})月(\d{1,2})日$")
 
 
 class ValidationError(ValueError):
@@ -13,16 +17,46 @@ class ValidationError(ValueError):
 
 
 def parse_date_text(value: object, field_name: str) -> str:
-    text = str(value or "").strip()
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not text:
         raise ValidationError(f"{field_name}は必須です。")
     if not DATE_PATTERN.match(text):
-        raise ValidationError(f"{field_name}はYYYY-MM-DD形式で入力してください。")
+        converted = convert_date_text(text)
+        if converted:
+            return converted
+        raise ValidationError(f"{field_name}はYYYY-MM-DD、YYYY/MM/DD、MM/DD、M月D日形式で入力してください。")
     try:
         date.fromisoformat(text)
     except ValueError as exc:
         raise ValidationError(f"{field_name}の日付が不正です。") from exc
     return text
+
+
+def convert_date_text(text: str) -> str | None:
+    normalized = text.strip()
+    match = DATE_WITH_YEAR_PATTERN.match(normalized)
+    if match:
+        year, month, day = (int(part) for part in match.groups())
+        return _date_or_none(year, month, day)
+
+    match = DATE_WITHOUT_YEAR_PATTERN.match(normalized)
+    if match:
+        month, day = (int(part) for part in match.groups())
+        return _date_or_none(date.today().year, month, day)
+
+    match = JAPANESE_DATE_WITHOUT_YEAR_PATTERN.match(normalized)
+    if match:
+        month, day = (int(part) for part in match.groups())
+        return _date_or_none(date.today().year, month, day)
+
+    return None
+
+
+def _date_or_none(year: int, month: int, day: int) -> str | None:
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 
 def parse_required_text(value: object, field_name: str) -> str:
@@ -93,4 +127,3 @@ def normalize_inventory_payload(raw: dict[str, object], *, for_insert: bool) -> 
     if not for_insert:
         payload["updated_date"] = today
     return payload
-

@@ -7,8 +7,23 @@ from .constants import CSV_HEADERS, FIELD_TO_HEADER, HEADER_TO_FIELD
 from .database import create_backup, insert_inventory, list_inventory, today_text, transaction
 from .validation import ValidationError, normalize_inventory_payload
 
+MANABOX_REQUIRED_HEADERS = (
+    "Name",
+    "Set code",
+    "Collector number",
+    "Foil",
+    "Rarity",
+    "Quantity",
+    "Language",
+)
 
-def _read_csv(path: Path) -> list[dict[str, str]]:
+IMPORT_FORMAT_LABELS = {
+    "normal": "通常CSV",
+    "manabox": "Manabox CSV",
+}
+
+
+def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     encodings = ("utf-8-sig", "cp932")
     last_error: Exception | None = None
     for encoding in encodings:
@@ -17,22 +32,91 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
                 reader = csv.DictReader(file)
                 if not reader.fieldnames:
                     raise ValidationError("CSVヘッダー行が見つかりません。")
-                missing = [header for header in CSV_HEADERS if header not in reader.fieldnames]
-                if missing:
-                    raise ValidationError("通常CSVの列が不足しています: " + ", ".join(missing))
-                return list(reader)
+                return list(reader.fieldnames), list(reader)
         except UnicodeDecodeError as exc:
             last_error = exc
     raise ValidationError("CSVの文字コードを読み込めません。UTF-8またはCP932で保存してください。") from last_error
 
 
+def detect_import_format(headers: list[str]) -> str:
+    header_set = set(headers)
+    if all(header in header_set for header in MANABOX_REQUIRED_HEADERS):
+        return "manabox"
+    if all(header in header_set for header in CSV_HEADERS):
+        return "normal"
+
+    missing_normal = [header for header in CSV_HEADERS if header not in header_set]
+    missing_manabox = [header for header in MANABOX_REQUIRED_HEADERS if header not in header_set]
+    raise ValidationError(
+        "CSV形式を判別できません。\n"
+        "通常CSVの不足列: "
+        + ", ".join(missing_normal)
+        + "\nManabox CSVの不足列: "
+        + ", ".join(missing_manabox)
+    )
+
+
+def _foil_to_note(value: object) -> str:
+    text = str(value or "").strip()
+    lowered = text.casefold()
+    if lowered == "foil":
+        return "#Foil"
+    if lowered == "normal":
+        return ""
+    return text
+
+
+def _rarity_to_code(value: object) -> str:
+    text = str(value or "").strip()
+    return {
+        "common": "C",
+        "uncommon": "U",
+        "rare": "R",
+        "mythic": "M",
+    }.get(text.casefold(), text)
+
+
+def _language_to_code(value: object) -> str:
+    text = str(value or "").strip()
+    return "jp" if text.casefold() == "ja" else text
+
+
+def _normal_row_to_raw(row: dict[str, str]) -> dict[str, object]:
+    raw = {field: row.get(header, "") for header, field in HEADER_TO_FIELD.items()}
+    raw["inventory_id"] = ""
+    return raw
+
+
+def _manabox_row_to_raw(row: dict[str, str]) -> dict[str, object]:
+    today = today_text()
+    return {
+        "inventory_id": "",
+        "genre": "MTG",
+        "card_name": row.get("Name", ""),
+        "rarity": _rarity_to_code(row.get("Rarity", "")),
+        "set_name": row.get("Set code", ""),
+        "language": _language_to_code(row.get("Language", "")),
+        "collector_number": row.get("Collector number", ""),
+        "note": _foil_to_note(row.get("Foil", "")),
+        "condition": "",
+        "quantity": row.get("Quantity", ""),
+        "purchase_price": "",
+        "sale_price": "0",
+        "status": "準備中",
+        "registered_date": today,
+        "last_checked_date": today,
+        "updated_date": today,
+        "memo": "",
+    }
+
+
 def preview_import(path: str) -> tuple[list[dict[str, object]], list[str]]:
-    rows = _read_csv(Path(path))
+    headers, rows = _read_csv(Path(path))
+    import_format = detect_import_format(headers)
     normalized_rows: list[dict[str, object]] = []
     errors: list[str] = []
     for index, row in enumerate(rows, start=2):
-        raw = {field: row.get(header, "") for header, field in HEADER_TO_FIELD.items()}
-        raw["inventory_id"] = ""
+        raw = _manabox_row_to_raw(row) if import_format == "manabox" else _normal_row_to_raw(row)
         try:
             normalized = normalize_inventory_payload(raw, for_insert=True)
         except ValidationError as exc:
@@ -40,6 +124,13 @@ def preview_import(path: str) -> tuple[list[dict[str, object]], list[str]]:
             continue
         normalized_rows.append(normalized)
     return normalized_rows, errors
+
+
+def preview_import_with_format(path: str) -> tuple[str, list[dict[str, object]], list[str]]:
+    headers, _rows = _read_csv(Path(path))
+    import_format = detect_import_format(headers)
+    rows, errors = preview_import(path)
+    return IMPORT_FORMAT_LABELS[import_format], rows, errors
 
 
 def import_csv(path: str, *, skip_errors: bool) -> tuple[int, list[str]]:
@@ -56,8 +147,9 @@ def import_csv(path: str, *, skip_errors: bool) -> tuple[int, list[str]]:
     return len(normalized_rows), errors
 
 
-def export_csv(path: str, status_filter: str = "") -> int:
-    rows = list_inventory(status_filter)
+def export_csv(path: str, status_filter: str = "", rows: list[object] | None = None) -> int:
+    if rows is None:
+        rows = list_inventory(status_filter)
     with Path(path).open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
         writer.writeheader()
@@ -100,4 +192,3 @@ def write_sample_csv(path: Path) -> None:
         writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
         writer.writeheader()
         writer.writerows(rows)
-
