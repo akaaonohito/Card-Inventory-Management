@@ -12,12 +12,16 @@ from urllib.parse import quote_plus
 
 from .constants import (
     APP_NAME,
+    CONDITION_VALUES,
     DEFAULT_VISIBLE_COLUMNS,
     DETAIL_EDIT_FIELDS,
     DISPLAYABLE_COLUMNS,
     EDIT_FIELDS,
     FIELD_TO_HEADER,
+    GENRE_VALUES,
+    LANGUAGE_VALUES,
     PURCHASE_MODE_EDIT_FIELDS,
+    RARITY_VALUES,
     SORT_FIELDS,
     STATUS_VALUES,
     VIRTUAL_FIELD_LABELS,
@@ -55,6 +59,14 @@ DATE_FILTER_LABEL_TO_FIELD = {
     "更新日": "updated_date",
     "最終確認日": "last_checked_date",
 }
+ADD_FIELD_CHOICES = {
+    "genre": GENRE_VALUES,
+    "rarity": RARITY_VALUES,
+    "language": LANGUAGE_VALUES,
+    "condition": CONDITION_VALUES,
+    "status": STATUS_VALUES,
+}
+ADD_READONLY_FIELDS = {"genre", "status"}
 QUICK_EDIT_EXCLUDED_FIELDS = {
     "selected",
     "inventory_id",
@@ -331,8 +343,15 @@ class InventoryApp(tk.Tk):
             ttk.Label(form, text=FIELD_LABELS[field]).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=4)
             var = tk.StringVar(value=defaults.get(field, ""))
             self.add_vars[field] = var
-            if field == "status":
-                widget = ttk.Combobox(form, textvariable=var, values=STATUS_VALUES, state="readonly", width=28)
+            if field in ADD_FIELD_CHOICES:
+                state = "readonly" if field in ADD_READONLY_FIELDS else "normal"
+                widget = ttk.Combobox(
+                    form,
+                    textvariable=var,
+                    values=ADD_FIELD_CHOICES[field],
+                    state=state,
+                    width=28,
+                )
             elif field == "last_checked_date":
                 widget = self._date_entry(form, var)
             else:

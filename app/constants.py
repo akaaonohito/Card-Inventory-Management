@@ -15,6 +15,43 @@ STATUS_VALUES = (
     "削除済み",
 )
 
+GENRE_VALUES = (
+    "MTG",
+    "ポケカ",
+    "遊戯王",
+    "デュエマ",
+    "ワンピースカード",
+    "その他",
+)
+
+RARITY_VALUES = (
+    "C",
+    "U",
+    "R",
+    "M",
+    "UC",
+    "RR",
+    "RRR",
+    "SR",
+    "UR",
+    "SAR",
+    "SEC",
+)
+
+LANGUAGE_VALUES = (
+    "jp",
+    "en",
+    "ja",
+)
+
+CONDITION_VALUES = (
+    "NM",
+    "EX",
+    "PLD",
+    "MP",
+    "HP",
+)
+
 CSV_HEADERS = (
     "在庫ID",
     "ジャンル",
